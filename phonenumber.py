@@ -12,7 +12,10 @@ Number_segments={
         192
     ]
 }
-with open("prefixes_phonenumber.txt","w+",encoding="utf-8") as f:
+import os
+script_dir = os.path.dirname(os.path.abspath(__file__))
+prefixes_path = os.path.join(script_dir, "prefixes_phonenumber.txt")
+with open(prefixes_path,"w+",encoding="utf-8") as f:
     for key,value in Number_segments.items():
         for segment in value:
             for i in range(10000):
