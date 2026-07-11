@@ -1,32 +1,26 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\Eureka\\Desktop\\PhoneTraverse\\PhoneTraverse.csproj": {}
+    "/home/eureka/文档/PhoneTraverse/PhoneTraverse.csproj": {}
   },
   "projects": {
-    "C:\\Users\\Eureka\\Desktop\\PhoneTraverse\\PhoneTraverse.csproj": {
+    "/home/eureka/文档/PhoneTraverse/PhoneTraverse.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Eureka\\Desktop\\PhoneTraverse\\PhoneTraverse.csproj",
+        "projectUniqueName": "/home/eureka/文档/PhoneTraverse/PhoneTraverse.csproj",
         "projectName": "PhoneTraverse",
-        "projectPath": "C:\\Users\\Eureka\\Desktop\\PhoneTraverse\\PhoneTraverse.csproj",
-        "packagesPath": "C:\\Users\\Eureka\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Eureka\\Desktop\\PhoneTraverse\\obj\\",
+        "projectPath": "/home/eureka/文档/PhoneTraverse/PhoneTraverse.csproj",
+        "packagesPath": "/home/eureka/.nuget/packages/",
+        "outputPath": "/home/eureka/文档/PhoneTraverse/obj/",
         "projectStyle": "PackageReference",
-        "fallbackFolders": [
-          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
-        ],
         "configFilePaths": [
-          "C:\\Users\\Eureka\\AppData\\Roaming\\NuGet\\NuGet.Config",
-          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
-          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+          "/home/eureka/.nuget/NuGet/NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net10.0"
         ],
         "sources": {
-          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
-          "C:\\Program Files\\dotnet\\library-packs": {},
+          "/usr/lib64/dotnet/library-packs": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
@@ -45,7 +39,7 @@
           "auditLevel": "low",
           "auditMode": "all"
         },
-        "SdkAnalysisLevel": "10.0.200"
+        "SdkAnalysisLevel": "10.0.100"
       },
       "frameworks": {
         "net10.0": {
@@ -66,7 +60,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json",
+          "runtimeIdentifierGraphPath": "/usr/lib64/dotnet/sdk/10.0.109/PortableRuntimeIdentifierGraph.json",
           "packagesToPrune": {
             "Microsoft.CSharp": "(,4.7.32767]",
             "Microsoft.VisualBasic": "(,10.4.32767]",

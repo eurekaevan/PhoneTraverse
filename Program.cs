@@ -16,18 +16,17 @@ var lastPrefix = 0;
 var failedPrefixes = new HashSet<string>();
 
 Console.WriteLine("📂 正在加载缓存...");
-// 加载缓存：第一行是进度，第二行是失败序号（逗号分隔）
 if (File.Exists(cacheFile))
 {
     var lines = await File.ReadAllLinesAsync(cacheFile);
     if (lines.Length > 0 && int.TryParse(lines[0].Trim(), out var idx))
     {
         lastPrefix = idx;
-        // 计算上次已处理的索引（读取前缀文件并统计在目标值之前的行数）
         if (File.Exists(prefixesPhonenumber))
         {
             var prefixLines = await File.ReadAllLinesAsync(prefixesPhonenumber);
-            lastIndex = prefixLines.IndexOf(lastPrefix.ToString());
+            lastIndex = Array.IndexOf(prefixLines, lastPrefix.ToString());
+            if (lastIndex == -1) lastIndex = 0; // 防止找不到导致异常
         }
         else
         {
@@ -64,7 +63,6 @@ else
 
 Console.WriteLine();
 Console.WriteLine("🔄 正在准备任务队列...");
-// 合并待处理列表：失败的 + 剩余未处理的
 var toProcess = new List<string>();
 if (failedPrefixes.Count > 0)
 {
@@ -97,7 +95,6 @@ if (toProcess.Count == 0)
 
 Console.WriteLine();
 Console.WriteLine("💾 正在加载已有数据...");
-// 加载已有数据到内存（用于去重和覆盖）
 var existingData = new Dictionary<string, string>();
 if (File.Exists(savePath))
 {
@@ -119,10 +116,8 @@ else
 Console.WriteLine();
 Console.WriteLine("===== 🚀 开始爬取数据... =====");
 
-// 在循环外创建 HttpClient (复用)
 using var client = new HttpClient();
-client.DefaultRequestHeaders.Add("Referer", "https://ipw.cn/phone/");
-client.DefaultRequestHeaders.Add("User-Agent",
+client.DefaultRequestHeaders.UserAgent.ParseAdd(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
 using var semaphore = new SemaphoreSlim(1, 1);
@@ -139,78 +134,86 @@ await Parallel.ForEachAsync(toProcess, new ParallelOptions { MaxDegreeOfParallel
     await Task.Delay(Random.Shared.Next(500, 1000), ct);
 
     var success = false;
+    var phone = prefix + "0000";
+
     try
     {
-        var result = await client.GetStringAsync($"https://ipw.cn/api/phone/query?number={prefix}", ct);
+        // 按照最新的调用方式，使用 x-www-form-urlencoded 提交 POST 请求
+        var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["no"] = phone
+        });
 
+        using var response = await client.PostAsync("https://api.ip33.com/mobile/s", content, ct);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadAsStringAsync(ct);
         using var jsonDoc = JsonDocument.Parse(result);
         var root = jsonDoc.RootElement;
 
-        if (root.TryGetProperty("code", out var codeProp))
+        if (root.TryGetProperty("code", out var codeProp) && codeProp.GetInt32() == 0)
         {
             lock (cacheLock)
             {
-                failedPrefixes.Remove(prefix); // 从失败列表移除
+                failedPrefixes.Remove(prefix);
             }
 
-            if (codeProp.GetString() == "success")
+            // 适配新返回格式：注意 API 拼写为 provance，运营商字段为 type
+            var province = root.TryGetProperty("provance", out var pProp) ? pProp.GetString() ?? "" : "";
+            var city = root.TryGetProperty("city", out var cProp) ? cProp.GetString() ?? "" : "";
+            var isp = root.TryGetProperty("type", out var tProp) ? tProp.GetString() ?? "" : "";
+
+            var line = $"{prefix},{province},{city},{isp}";
+
+            await semaphore.WaitAsync(ct);
+            try
             {
-                if (root.TryGetProperty("data", out var data))
-                {
-                    var province = data.GetProperty("province").GetString();
-                    var city = data.GetProperty("city").GetString();
-                    var isp = data.GetProperty("isp").GetString();
-                    var line = $"{prefix},{province},{city},{isp}";
-
-                    await semaphore.WaitAsync(ct);
-                    try
-                    {
-                        // 存在则覆盖，不存在则新增
-                        existingData[prefix] = line;
-                        SaveData();
-                        SaveCache(prefix); // 保存当前处理的号码到缓存
-                        Interlocked.Increment(ref successCount);
-                        var current = processedCount + 1;
-                        var percent = (double)current / totalToProcess * 100;
-                        Console.WriteLine(
-                            $"[{current}/{totalToProcess}] ({percent:F1}%) ✅ {prefix} → {province}, {city}, {isp}");
-                        success = true;
-                    }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
-                }
-                else
-                {
-                    var msg = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "未知原因";
-                    Console.WriteLine($"[{processedCount + 1}/{totalToProcess}] ⚠️  {prefix} - API返回成功但缺少数据: {msg}");
-                }
+                existingData[prefix] = line;
+                SaveData();
             }
+            finally
+            {
+                semaphore.Release();
+            }
+
+            Interlocked.Increment(ref successCount);
+            var current = Interlocked.Increment(ref processedCount);
+            var percent = (double)current / totalToProcess * 100;
+            Console.WriteLine($"[{current}/{totalToProcess}] ({percent:F1}%) ✅ {prefix} → {province}, {city}, {isp}");
+            
+            success = true;
+            SaveCache(prefix); // 成功后保存当前处理的号码到缓存
+        }
+        else
+        {
+            var msg = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "未返回有效数据";
+            var current = Interlocked.Increment(ref processedCount);
+            Console.WriteLine($"[{current}/{totalToProcess}] ⚠️ {prefix} - 查询失败: {msg}");
         }
     }
     catch (HttpRequestException ex)
     {
-        Console.WriteLine($"[{processedCount + 1}/{totalToProcess}] ❌ {prefix} - 网络错误: {ex.Message}");
+        var current = Interlocked.Increment(ref processedCount);
+        Console.WriteLine($"[{current}/{totalToProcess}] ❌ {prefix} - 网络错误: {ex.Message}");
     }
     catch (TaskCanceledException)
     {
-        Console.WriteLine($"[{processedCount + 1}/{totalToProcess}] ⏱️  {prefix} - 请求超时");
+        var current = Interlocked.Increment(ref processedCount);
+        Console.WriteLine($"[{current}/{totalToProcess}] ⏱️  {prefix} - 请求超时");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"[{processedCount + 1}/{totalToProcess}] ❌ {prefix} - 错误: {ex.Message}");
+        var current = Interlocked.Increment(ref processedCount);
+        Console.WriteLine($"[{current}/{totalToProcess}] ❌ {prefix} - 错误: {ex.Message}");
     }
 
-    // 更新进度并即时保存缓存
-    Interlocked.Increment(ref processedCount);
+    // 失败情况处理
     if (!success)
     {
         lock (cacheLock)
         {
             failedPrefixes.Add(prefix); // 失败则加入失败列表
         }
-
         SaveCache(prefix);
     }
 });
@@ -223,7 +226,6 @@ void SaveCache(string? current = null)
 {
     lock (cacheLock)
     {
-        // 如果传入了当前处理的号码，更新进度记录
         if (current != null && int.TryParse(current, out var p))
         {
             processedPrefix = p;
@@ -237,7 +239,7 @@ void SaveCache(string? current = null)
 // 即时保存数据文件的方法
 void SaveData()
 {
-    lock (cacheLock)
+    lock (cacheLock) // 复用 cacheLock 或者使用单独的 lock 确保写入安全
     {
         File.WriteAllLines(savePath, existingData.Values, Encoding.UTF8);
     }
