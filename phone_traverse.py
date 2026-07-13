@@ -77,23 +77,18 @@ def main():
 
     print()
     
-    # 3. 正在准备任务队列
+    # 3. 正在准备任务队列 (拆分为重试和正常两部分)
     print("🔄 正在准备任务队列...")
-    to_process = []
-    if len(failed_prefixes) > 0:
-        print(f"   🔁 将重新爬取 {len(failed_prefixes)} 个之前失败的序号")
-        to_process.extend(failed_prefixes)
+    retry_tasks = list(failed_prefixes)
+    normal_tasks = []
+    
+    if last_index < len(prefixes_list):
+        normal_tasks = prefixes_list[last_index:]
+        
+    print(f"   🔁 失败重试任务: {len(retry_tasks)} 个")
+    print(f"   ⏭️  正常进度任务: {len(normal_tasks)} 个 (跳过前 {last_index} 个)")
 
-    if last_index > 0 and last_index < len(prefixes_list):
-        remaining = prefixes_list[last_index:]
-        to_process.extend(remaining)
-        print(f"   ⏭️  跳过前 {last_index} 个，剩余 {len(remaining)} 个待爬取")
-    elif last_index == 0 and len(failed_prefixes) == 0:
-        to_process = prefixes_list.copy()
-
-    print(f"   📊 本次共需处理: {len(to_process)} 个")
-
-    if len(to_process) == 0:
+    if len(retry_tasks) == 0 and len(normal_tasks) == 0:
         print()
         print("🎉 没有需要处理的任务，程序退出")
         return
@@ -126,16 +121,14 @@ def main():
     processed_prefix_lock = threading.RLock()
     nonlocal_vars = {
         'processed_prefix': last_prefix,
-        'processed_count': last_index,
+        'processed_count': 0, 
         'success_count': 0,
     }
     
-    total_to_process = len(to_process)
-    
-    # 保存缓存的方法
-    def save_cache(current_val=None):
+    # 保存缓存的方法 (增加 update_main_progress 标志，重试时不推进度号)
+    def save_cache(current_val=None, update_main_progress=True):
         with processed_prefix_lock:
-            if current_val is not None:
+            if current_val is not None and update_main_progress:
                 try:
                     nonlocal_vars['processed_prefix'] = int(current_val)
                 except ValueError:
@@ -157,107 +150,123 @@ def main():
             except Exception as e:
                 pass
 
-    # 使用 queue.Queue 进行轻量级分发
-    task_queue = queue.Queue()
-    for prefix in to_process:
-        task_queue.put(prefix)
-    
-    # 添加终止信号
-    for _ in range(3):
-        task_queue.put(None)
-
-    def worker():
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
+    # 核心并发控制逻辑封装
+    def process_tasks(tasks, is_retry_phase=False):
+        if not tasks:
+            return
+            
+        task_queue = queue.Queue()
+        for prefix in tasks:
+            task_queue.put(prefix)
         
-        while True:
-            prefix = task_queue.get()
-            if prefix is None:
-                task_queue.task_done()
-                break
+        # 添加终止信号 (3 个线程)
+        for _ in range(3):
+            task_queue.put(None)
+
+        nonlocal_vars['processed_count'] = 0
+        total_tasks = len(tasks)
+        phase_name = "重试阶段" if is_retry_phase else "正常进度"
+
+        def worker():
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
             
-            # 随机延迟，避免触发反爬机制
-            time.sleep(random.uniform(0.5, 1.0))
-
-            success = False
-            phone = prefix + "0000"
-
-            try:
-                # 按照最新的调用方式，使用 x-www-form-urlencoded 提交 POST 请求
-                response = session.post("https://api.ip33.com/mobile/s", data={"no": phone}, timeout=10)
-                response.raise_for_status()
-
-                result = response.json()
+            while True:
+                prefix = task_queue.get()
+                if prefix is None:
+                    task_queue.task_done()
+                    break
                 
-                if result.get("code") == 0:
+                # 随机延迟，避免触发反爬机制
+                time.sleep(random.uniform(1, 10))
+
+                success = False
+                phone = prefix + "0000"
+
+                try:
+                    response = session.post("https://api.ip33.com/mobile/s", data={"no": phone}, timeout=10)
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    if result.get("code") == 0:
+                        with processed_prefix_lock:
+                            if prefix in failed_prefixes:
+                                failed_prefixes.remove(prefix)
+
+                        province = result.get("provance", "") or ""
+                        city = result.get("city", "") or ""
+                        isp = result.get("type", "") or ""
+
+                        line = f"{prefix},{province},{city},{isp}"
+
+                        with processed_prefix_lock:
+                            existing_data[prefix] = line
+                            save_data()
+                            nonlocal_vars['success_count'] += 1
+                            nonlocal_vars['processed_count'] += 1
+                            current = nonlocal_vars['processed_count']
+                            percent = (current / total_tasks) * 100
+                            print(f"[{phase_name}] [{current}/{total_tasks}] ({percent:.1f}%) ✅ {prefix} → {province}, {city}, {isp}")
+
+                        success = True
+                        save_cache(prefix, update_main_progress=not is_retry_phase)
+                    else:
+                        msg = result.get("message", "未返回有效数据")
+                        with processed_prefix_lock:
+                            nonlocal_vars['processed_count'] += 1
+                            current = nonlocal_vars['processed_count']
+                            print(f"[{phase_name}] [{current}/{total_tasks}] ⚠️ {prefix} - 查询失败: {msg}")
+                except requests.exceptions.Timeout:
                     with processed_prefix_lock:
-                        if prefix in failed_prefixes:
-                            failed_prefixes.remove(prefix)
-
-                    # 适配新返回格式：注意 API 拼写为 provance，运营商字段为 type
-                    province = result.get("provance", "") or ""
-                    city = result.get("city", "") or ""
-                    isp = result.get("type", "") or ""
-
-                    line = f"{prefix},{province},{city},{isp}"
-
-                    with processed_prefix_lock:
-                        existing_data[prefix] = line
-                        save_data()
-                        nonlocal_vars['success_count'] += 1
                         nonlocal_vars['processed_count'] += 1
                         current = nonlocal_vars['processed_count']
-                        percent = (current / total_to_process) * 100
-                        print(f"[{current}/{total_to_process}] ({percent:.1f}%) ✅ {prefix} → {province}, {city}, {isp}")
-
-                    success = True
-                    save_cache(prefix)  # 成功后保存当前处理的号码到缓存
-                else:
-                    msg = result.get("message", "未返回有效数据")
+                        print(f"[{phase_name}] [{current}/{total_tasks}] ⏱️  {prefix} - 请求超时")
+                except requests.exceptions.RequestException as ex:
                     with processed_prefix_lock:
                         nonlocal_vars['processed_count'] += 1
                         current = nonlocal_vars['processed_count']
-                        print(f"[{current}/{total_to_process}] ⚠️ {prefix} - 查询失败: {msg}")
-            except requests.exceptions.Timeout:
-                with processed_prefix_lock:
-                    nonlocal_vars['processed_count'] += 1
-                    current = nonlocal_vars['processed_count']
-                    print(f"[{current}/{total_to_process}] ⏱️  {prefix} - 请求超时")
-            except requests.exceptions.RequestException as ex:
-                with processed_prefix_lock:
-                    nonlocal_vars['processed_count'] += 1
-                    current = nonlocal_vars['processed_count']
-                    print(f"[{current}/{total_to_process}] ❌ {prefix} - 网络错误: {ex}")
-            except Exception as ex:
-                with processed_prefix_lock:
-                    nonlocal_vars['processed_count'] += 1
-                    current = nonlocal_vars['processed_count']
-                    print(f"[{current}/{total_to_process}] ❌ {prefix} - 错误: {ex}")
+                        print(f"[{phase_name}] [{current}/{total_tasks}] ❌ {prefix} - 网络错误: {ex}")
+                except Exception as ex:
+                    with processed_prefix_lock:
+                        nonlocal_vars['processed_count'] += 1
+                        current = nonlocal_vars['processed_count']
+                        print(f"[{phase_name}] [{current}/{total_tasks}] ❌ {prefix} - 错误: {ex}")
 
-            # 失败情况处理
-            if not success:
-                with processed_prefix_lock:
-                    failed_prefixes.add(prefix)
-                save_cache(prefix)
-            
-            task_queue.task_done()
+                # 失败情况处理
+                if not success:
+                    with processed_prefix_lock:
+                        failed_prefixes.add(prefix)
+                    save_cache(prefix, update_main_progress=not is_retry_phase)
+                
+                task_queue.task_done()
 
-    threads = []
-    for _ in range(3):
-        t = threading.Thread(target=worker)
-        t.start()
-        threads.append(t)
+        threads = []
+        for _ in range(3):
+            t = threading.Thread(target=worker)
+            t.start()
+            threads.append(t)
 
-    # 等待所有任务处理完毕
-    for t in threads:
-        t.join()
+        for t in threads:
+            t.join()
+
+    # ====== 过程 1：重试失败序号 ======
+    if retry_tasks:
+        print(f"\n--- 🔄 开始执行 [重试阶段] ---")
+        process_tasks(retry_tasks, is_retry_phase=True)
+        print(f"--- ⏹️ [重试阶段] 结束，剩余未成功重试数: {len(failed_prefixes)} ---")
+
+    # ====== 过程 2：从上次进度继续 ======
+    if normal_tasks:
+        print(f"\n--- 🚀 开始执行 [正常进度] ---")
+        process_tasks(normal_tasks, is_retry_phase=False)
+        print("--- ⏹️ [正常进度] 结束 ---")
 
     if len(failed_prefixes) > 0:
-        print("⚠️  失败序号已保存到缓存，下次运行将优先重试")
+        print("\n⚠️  部分序号仍查询失败并保存到缓存，下次运行将优先重试")
     else:
-        print("🎉 全部处理完成！")
+        print("\n🎉 全部处理完成！")
 
 if __name__ == "__main__":
     main()
