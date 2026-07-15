@@ -119,6 +119,16 @@ def main():
             time.sleep(random.uniform(1, 8))
             phone = prefix + "0000"
 
+            # 区分：是接口正常响应但无数据，还是网络彻底断开
+            should_mark_done = False
+            record_data = {
+                "prefix": prefix,
+                "province": None, # Python 的 None 写入 PostgreSQL 后会自动变成标准 NULL
+                "city": None,
+                "isp": None,
+                "vps_id": f"vps-{args.vps_id}"
+            }
+
             try:
                 response = session.post("https://api.ip33.com/mobile/s", data={"no": phone}, timeout=10)
                 response.raise_for_status()
@@ -128,32 +138,38 @@ def main():
                 percent = (processed_count / total_to_do) * 100
 
                 if result.get("code") == 0:
-                    province = result.get("provance", "") or ""  # 保持 API 的拼写错误
-                    city = result.get("city", "") or ""
-                    isp = result.get("type", "") or ""
-
-                    # 丢进内存缓冲区
-                    with buffer_lock:
-                        db_buffer.append({
-                            "prefix": prefix,
-                            "province": province,
-                            "city": city,
-                            "isp": isp,
-                            "vps_id": f"vps-{args.vps_id}"
-                        })
+                    # 正常跑出数据的情况
+                    record_data["province"] = result.get("provance", "") or None
+                    record_data["city"] = result.get("city", "") or None
+                    record_data["isp"] = result.get("type", "") or None
                     
                     success_count += 1
-                    print(f"[{processed_count}/{total_to_do}] ({percent:.1f}%) ✅ {prefix} → {province} {city}")
-                    
-                    # 缓冲区攒够 100 条就往 Supabase 批量冲洗一次
-                    if len(db_buffer) >= 100:
-                        flush_buffer_to_db()
+                    print(f"[{processed_count}/{total_to_do}] ({percent:.1f}%) ✅ {prefix} → {record_data['province']} {record_data['city']}")
+                    should_mark_done = True
                 else:
-                    print(f"[{processed_count}/{total_to_do}] ⚠️ {prefix} - 查询失败: {result.get('message')}")
+                    # 接口明确返回 code != 0 (例如：未分配的号段、空号、非法号段)
+                    # 这种属于“有效爬取，明确无数据”，必须写入数据库留空，防止以后重复爬取
+                    msg = result.get("message", "接口返回无数据")
+                    print(f"[{processed_count}/{total_to_do}] ({percent:.1f}%) 🕳️  {prefix} - 接口无数据({msg})，已留空标记")
+                    should_mark_done = True
                     
             except Exception as ex:
+                # 这种属于网络超时、代理挂了、或者对方服务器 502 等“非正常响应”
+                # 此时不应该写入数据库留空！因为该号段本身可能有数据，只是这次网络坏了。
+                # 留空不写入，等下次 VPS 重启或者断点续传时，还会重新爬取，保证数据不漏。
                 processed_count += 1
-                print(f"[{processed_count}/{total_to_do}] ❌ {prefix} - 网络或解析错误: {ex}")
+                percent = (processed_count / total_to_do) * 100
+                print(f"[{processed_count}/{total_to_do}] ({percent:.1f}%) ❌ {prefix} - 网络或服务器错误: {ex}，将跳过并等待日后重试")
+                should_mark_done = False
+
+            # 如果确定需要标记为“已完成”（无论是抓到数据还是明确空号），都塞入缓冲区
+            if should_mark_done:
+                with buffer_lock:
+                    db_buffer.append(record_data)
+                
+                # 缓冲区攒够 100 条（不管是正常的还是留空的）就往 Supabase 批量冲洗一次
+                if len(db_buffer) >= 100:
+                    flush_buffer_to_db()
             
             task_queue.task_done()
 
